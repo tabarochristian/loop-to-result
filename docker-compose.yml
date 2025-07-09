@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  web:
+    build: .
+    container_name: ai-feedback-web
+    ports:
+      - "5000:5000"
+    environment:
+      - SMTP_HOST=smtp.example.com
+      - SMTP_PORT=587
+      - SMTP_USERNAME=your-username
+      - SMTP_PASSWORD=your-password
+      - SMTP_USE_TLS=true
+      - OPENAI_API_KEY=your-openai-key
+      - GROK_API_KEY=your-grok-key
+      - ANTHROPIC_API_KEY=your-anthropic-key
+    volumes:
+      - ./data:/app/data # persist SQLite DB
+    restart: always
+
+volumes:
+  data:

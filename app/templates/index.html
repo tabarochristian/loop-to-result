@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Code Feedback Loop</title>
+    <!-- Bootstrap CSS -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+  </head>
+
+  <body>
+    <div class="container-fluid">
+      <div class="row vh-100">
+        <nav class="col-md-4 col-lg-3 bg-light sidebar p-3 overflow-auto">
+          <h2>Experiments</h2>
+          <div
+            id="experiments-list"
+            class="list-group"
+            style="max-height: 85vh; overflow-y: auto"
+          >
+            <!-- Dynamically populated -->
+            {% for experiment in experiments %}
+            <a
+              class="list-group-item d-flex justify-content-between align-items-start"
+              href="/progress/{{ experiment.id }}"
+            >
+              <div class="ms-2 me-auto">
+                <div class="fw-bold">
+                  Experiment #{{ experiment.id }} - {{ experiment.ai_client |
+                  capitalize }} / {{ experiment.model }}
+                </div>
+                <small class="text-muted"
+                  >Started: {{ experiment.created_at.strftime('%Y-%m-%d %H:%M')
+                  }}</small
+                >
+              </div>
+              <span
+                class="badge me-1 {% if experiment.status == 'completed' %} bg-success {% elif experiment.status == 'running' %} bg-primary {% elif experiment.status == 'error' %} bg-danger {% else %} bg-secondary {% endif %} rounded-pill"
+              >
+                {{ experiment.status.capitalize() }}
+              </span>
+            </a>
+            {% else %}
+            <a class="list-group-item text-muted">No experiments found.</a>
+            {% endfor %}
+          </div>
+        </nav>
+
+        <main class="col-md-6 col-lg-9 px-md-4">
+          <h1 class="mt-3">Start New Experiment</h1>
+
+          <form id="experiment-form" class="mb-4" method="post" action="/start">
+            <div class="mb-3">
+              <label for="prompt" class="form-label"
+                >Initial Prompt / Additional Info</label
+              >
+              <textarea
+                id="prompt"
+                name="prompt"
+                class="form-control"
+                rows="5"
+                required
+              ></textarea>
+            </div>
+
+            <div class="mb-3">
+              <label for="ai-client-model" class="form-label"
+                >Select AI Client & Model</label
+              >
+              <select
+                id="ai-client-model"
+                name="model"
+                class="form-select"
+                required
+              >
+                <optgroup label="OpenAI">
+                  <option value="openai:gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                  <option value="openai:gpt-4">GPT-4</option>
+                  <option value="openai:gpt-4o">GPT-4o</option>
+                </optgroup>
+                <optgroup label="Grok">
+                  <option value="grok:grok-1">Grok-1</option>
+                  <option value="grok:grok-1.5">Grok-1.5</option>
+                </optgroup>
+                <optgroup label="Claude">
+                  <option value="claude:claude-2">Claude-2</option>
+                  <option value="claude:claude-3">Claude-3</option>
+                </optgroup>
+              </select>
+            </div>
+
+            <button type="submit" class="btn btn-primary">
+              Start Experiment
+            </button>
+          </form>
+
+          <section id="experiment-status" style="display: none">
+            <h2>Experiment Status</h2>
+            <div id="status-summary" class="mb-3"></div>
+            <pre
+              id="conversation-log"
+              class="border rounded p-3 bg-light"
+              style="height: 300px; overflow-y: auto"
+            ></pre>
+            <button id="stop-experiment-btn" class="btn btn-danger mt-3">
+              Stop Experiment
+            </button>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
