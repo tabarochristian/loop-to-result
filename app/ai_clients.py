@@ -1,191 +1,168 @@
 import os
-import requests
-
-import os
-from xai_sdk import Client
-import time
-import random
-
-import os
-import time
-import random
-import logging
-from xai_sdk import Client
-
 import re
-import os
-import time
-import random
 import logging
+from typing import Tuple, Optional, List, Dict
 from xai_sdk import Client
 from xai_sdk.chat import system, user, assistant
 
-# Configure logging for debugging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
 
 class AIClient:
-    """
-    Abstract base class for AI clients.
-    """
-    def __init__(self, model=None, system_prompt=None):
+    """Abstract base class for AI clients with enhanced error handling and logging."""
+    
+    def __init__(self, model: Optional[str] = None, system_prompt: Optional[str] = None):
         self.model = model
         self.system_prompt = system_prompt or (
-            "You are an AI coding assistant in a Jupyter notebook. "
-            "The conversation consists of user questions and executed code results (Jupyter outputs). "
-            "You respond with Python code and explanations when appropriate."
+            "You are an expert AI coding assistant. Your responses should include:\n"
+            "1. Clear explanations of the solution approach\n"
+            "2. Well-formatted Python code blocks when applicable\n"
+            "3. Analysis of potential edge cases\n"
+            "4. Suggestions for optimization and improvement"
         )
+        self._validate_initialization()
 
-    def extract_code_and_clean_text(self, text):
-        """
-        Extracts the first Python code block from markdown-style content.
-        Returns a tuple:
-        (code inside the block, text without the code block including delimiters)
-        """
-        # Regex to find the code block including delimiters
-        match = re.search(r"```python\n(.*?)\n```", text, re.DOTALL)
-        if match:
-            code_only = match.group(1)             # Extract inner code
-            full_block = match.group(0)            # Entire block with backticks
-            cleaned_text = text.replace(full_block, "").strip()  # Remove block completely
-            return code_only, cleaned_text
-        return None, text.strip()
+    def _validate_initialization(self):
+        """Validate that required configurations are present."""
+        if not self.model:
+            raise ValueError("Model name must be specified")
+        if not self.system_prompt:
+            raise ValueError("System prompt must be specified")
 
-    def query(self, history):
+    def extract_code_and_clean_text(self, text: str) -> Tuple[Optional[str], str]:
         """
-        Given conversation history (list of dicts with 'sender' and 'content'), return next code suggestion string.
-        Only considers User and Jupyter messages as input.
+        Enhanced code extraction with support for multiple code blocks.
+        Returns:
+            Tuple: (combined_code, cleaned_text)
         """
-        raise NotImplementedError()
+        code_blocks = []
+        cleaned_text = text
+        
+        # Find all Python code blocks
+        pattern = r"```python\n(.*?)\n```"
+        matches = re.finditer(pattern, text, re.DOTALL)
+        
+        for match in matches:
+            code_blocks.append(match.group(1))
+            cleaned_text = cleaned_text.replace(match.group(0), "")
+        
+        combined_code = "\n\n# ----- New Code Block -----\n\n".join(code_blocks) if code_blocks else None
+        return combined_code, cleaned_text.strip()
 
-    @staticmethod
-    def validate_history(history):
+    def query(self, history: List[Dict[str, str]]) -> Tuple[str, Optional[str], str]:
+        """
+        Enhanced query method with better error handling and validation.
+        Returns:
+            Tuple: (original_response, extracted_code, cleaned_text)
+        """
+        self._validate_history(history)
+        messages = self._prepare_messages(history)
+        return self._execute_query(messages)
+
+    def _validate_history(self, history: List[Dict[str, str]]):
+        """Validate conversation history structure."""
+        if not isinstance(history, list):
+            raise ValueError("History must be a list")
+        
         for msg in history:
+            if not isinstance(msg, dict):
+                raise ValueError("Each message must be a dictionary")
             if 'sender' not in msg or 'content' not in msg:
-                raise ValueError(f"Invalid history message: {msg}")
+                raise ValueError("Each message must have 'sender' and 'content' keys")
+            if not isinstance(msg['content'], str):
+                raise ValueError("Message content must be a string")
 
-    def map_history_to_agent(self, history):
-        """
-        Maps conversation history to OpenAI / Grok compatible message format.
-        Filters out AI responses from history.
-        """
+    def _prepare_messages(self, history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Prepare messages in the format expected by the AI model."""
         messages = [{"role": "system", "content": self.system_prompt}]
+        
         for msg in history:
-            if msg['sender'] == 'user':
-                messages.append({"role": "user", "content": msg['content']})
-            elif msg['sender'] == 'assistant':
-                messages.append({"role": "user", "content": f"Jupyter output:\n{msg['content']}"})
-            elif msg['sender'] == 'system':
-                continue
-            else:
-                raise ValueError(f"Unknown sender: {msg['sender']}")
+            role = "user" if msg['sender'] == 'user' else "assistant"
+            content = msg['content']
+            
+            if msg['sender'] == 'assistant':
+                content = f"Execution Result:\n{content}"
+            
+            messages.append({"role": role, "content": content})
+        
         return messages
 
-# Configure logging for debugging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+    def _execute_query(self, messages: List[Dict[str, str]]) -> Tuple[str, Optional[str], str]:
+        """Execute the query against the AI model (to be implemented by subclasses)."""
+        raise NotImplementedError("Subclasses must implement this method")
+
 
 class GrokClient(AIClient):
-    """
-    Grok client using the official xAI Python SDK (synchronous, non-streaming).
-    Uses chat.create and sample() to generate a parsed response.
-    """
+    """Enhanced Grok client with better error handling and retry logic."""
+    
     SUPPORTED_MODELS = ["grok-beta", "grok-2", "grok-3", "grok-3-latest"]
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2.0  # seconds
 
-    def __init__(self, model=None, system_prompt=None):
-        """
-        Initialize the Grok client with synchronous xAI SDK client.
-
-        Args:
-            model (str, optional): The Grok model to use (e.g., 'grok-3-latest').
-            system_prompt (str, optional): Custom system prompt.
-        """
+    def __init__(self, model: Optional[str] = None, system_prompt: Optional[str] = None):
         super().__init__(model, system_prompt)
+        self._initialize_client()
+
+    def _initialize_client(self):
+        """Initialize the Grok client with proper configuration."""
         self.api_key = os.getenv("XAI_API_KEY")
         if not self.api_key:
             raise RuntimeError("XAI_API_KEY environment variable not set")
 
-        # Set default model to grok-3-latest to match cURL example
-        self.model = model or "grok-3-latest"
+        self.model = self.model or "grok-3-latest"
         if self.model not in self.SUPPORTED_MODELS:
-            raise ValueError(f"Unsupported model: {self.model}. Supported models: {self.SUPPORTED_MODELS}")
+            raise ValueError(f"Unsupported model: {self.model}. Supported: {', '.join(self.SUPPORTED_MODELS)}")
 
-        # Initialize xAI SDK client
         try:
-            import xai_sdk
-            logger.info(f"xAI SDK version: {xai_sdk.__version__}")
             self.client = Client(api_key=self.api_key)
-            logger.info("Initialized xAI Client")
-            # Verify chat.create exists
-            if not hasattr(self.client.chat, 'create'):
-                logger.error("Client.chat does not have 'create' attribute. Available attributes: %s", dir(self.client.chat))
-                raise RuntimeError("xAI SDK Client.chat is missing 'create'. Check SDK version.")
-        except ImportError as e:
-            logger.error("Failed to import xai_sdk. Ensure it is installed: pip install xai-sdk")
-            raise RuntimeError(f"xAI SDK import error: {str(e)}")
+            logger.info("Successfully initialized Grok client for model %s", self.model)
+        except Exception as e:
+            logger.error("Failed to initialize Grok client: %s", str(e))
+            raise RuntimeError(f"Failed to initialize Grok client: {str(e)}")
 
-    def query(self, history, max_retries=3):
-        """
-        Query the Grok API with conversation history and return the parsed response.
-
-        Args:
-            history (list): List of message dictionaries with 'sender' and 'content'.
-            max_retries (int): Maximum number of retry attempts for rate limit errors.
-
-        Returns:
-            str: The parsed API response content.
-
-        Raises:
-            RuntimeError: If the query fails after retries or due to other errors.
-        """
-        self.validate_history(history)
-        messages = self.map_history_to_agent(history)
-        logger.debug(f"Querying xAI API with messages: {messages}")
-
-        for attempt in range(max_retries):
+    def _execute_query(self, messages: List[Dict[str, str]]) -> Tuple[str, Optional[str], str]:
+        """Execute query with retry logic and enhanced error handling."""
+        last_error = None
+        
+        for attempt in range(self.MAX_RETRIES):
             try:
-                # Create chat session
-                chat = self.client.chat.create(
-                    model=self.model,
-                    temperature=0
-                )
-                logger.info(f"Started chat session with xAI API for model {self.model}")
-
-                # Append messages to chat
-                for message in messages:
-                    if message['role'] == 'system':
-                        chat.append(system(message['content']))
-                    elif message['role'] == 'user':
-                        chat.append(user(message['content']))
-                    elif message['role'] == 'assistant':
-                        chat.append(assistant(message['content']))
-                    else:
-                        logger.warning(f"Skipping unsupported message role: {message['role']}")
-
+                chat = self.client.chat.create(model=self.model, temperature=0.7)
+                
+                # Add messages to chat
+                for msg in messages:
+                    if msg['role'] == 'system':
+                        chat.append(system(msg['content']))
+                    elif msg['role'] == 'user':
+                        chat.append(user(msg['content']))
+                    elif msg['role'] == 'assistant':
+                        chat.append(assistant(msg['content']))
+                
                 # Get response
                 response = chat.sample()
-                logger.info(f"Received response from xAI API for model {self.model}")
+                
                 if hasattr(response, 'content'):
                     original = response.content.strip()
                     code, text = self.extract_code_and_clean_text(original)
                     return original, code, text
                 else:
-                    logger.warning("Response has no content attribute: %s", vars(response) if hasattr(response, '__dict__') else str(response))
-                    return ""
+                    logger.warning("Unexpected response format from Grok API")
+                    return "No response content received", None, "No response content received"
+            
             except Exception as e:
-                logger.error(f"Unexpected error: {str(e)}")
-                raise RuntimeError(f"Unexpected error: {str(e)}")
+                last_error = e
+                logger.warning("Attempt %d failed: %s", attempt + 1, str(e))
+                if attempt < self.MAX_RETRIES - 1:
+                    time.sleep(self.RETRY_DELAY)
+        
+        logger.error("All %d attempts failed. Last error: %s", self.MAX_RETRIES, str(last_error))
+        raise RuntimeError(f"Failed after {self.MAX_RETRIES} attempts. Last error: {str(last_error)}")
 
-def get_client(name, model=None, system_prompt=None):
+
+def get_client(name: str, model: Optional[str] = None, system_prompt: Optional[str] = None) -> AIClient:
+    """Factory function to get the appropriate AI client."""
     name = name.lower()
-    return GrokClient(model, system_prompt)
-
-    if name == 'openai':
-        return OpenAIClient(model, system_prompt)
-    elif name == 'claude':
-        return ClaudeClient(model, system_prompt)
-    elif name == 'grok':
+    
+    if name == 'grok':
         return GrokClient(model, system_prompt)
+    # Add other clients here as needed
     else:
-        raise ValueError(f"Unknown AI client: {name}")
+        raise ValueError(f"Unsupported AI client: {name}")

@@ -1,68 +1,77 @@
 import threading
 import uuid
+import logging
+from typing import Callable
 
 from models import Experiment
 from conversation import Conversation
 from feedback_loop import run_feedback_loop
 from executor import JupyterExecutor
 from ai_clients import get_client
-from notifier import send_email
 
+logger = logging.getLogger(__name__)
 
 class ExperimentManager:
-    """
-    Responsible for creating and starting experiments
-    """
-    def __init__(self, session_factory):
-        self.session_factory = session_factory  # pass the factory, not a session
-        self.db = self.session_factory()
+    """Manages experiment lifecycle including creation, execution, and monitoring."""
+    
+    def __init__(self, session_factory: Callable):
+        self.session_factory = session_factory
 
-    def start_experiment(self, prompt, ai_choice, model):
-        experiment = Experiment(
-            id=str(uuid.uuid4()),
-            prompt=prompt,
-            ai_choice=ai_choice,
-            model=model,
-            status='pending'
-        )
-        self.db.add(experiment)
-        self.db.commit()
-
+    def start_experiment(self, prompt: str, ai_choice: str, model: str) -> str:
+        """Start a new experiment with the given parameters."""
+        db = self.session_factory()
         try:
-            conversation = Conversation(experiment.id, self.db)
-            ai_client = get_client(ai_choice, model)
-            executor = JupyterExecutor()
+            experiment = Experiment(
+                id=str(uuid.uuid4()),
+                prompt=prompt,
+                ai_choice=ai_choice,
+                model=model,
+                status='pending'
+            )
+            db.add(experiment)
+            db.commit()
 
+            # Start execution in a separate thread
             thread = threading.Thread(
-                target=self._run_in_thread,
-                args=(experiment.id, ai_client, executor),
+                target=self._run_experiment,
+                args=(experiment.id,),
                 daemon=True
             )
             thread.start()
 
+            return experiment.id
         except Exception as e:
-            print(e)
-            experiment.status = 'failed'
-            with open("experiment_errors.log", "a") as log_file:
-                log_file.write(f"Experiment ID: {experiment.id} — Error: {experiment.status}\n")
+            logger.error(f"Failed to start experiment: {e}")
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
-        self.db.commit()
-        return experiment.id
-
-    def _run_in_thread(self, experiment_id, ai_client, executor):
-        # Create a new session for this thread
+    def _run_experiment(self, experiment_id: str):
+        """Run the experiment in a background thread."""
         db = self.session_factory()
         try:
             experiment = db.query(Experiment).get(experiment_id)
+            if not experiment:
+                logger.error(f"Experiment {experiment_id} not found")
+                return
+
             conversation = Conversation(db, experiment_id)
+            ai_client = get_client(experiment.ai_choice, experiment.model)
+            executor = JupyterExecutor()
 
             run_feedback_loop(
-                db,
-                experiment,
-                conversation,
-                ai_client,
-                executor,
-                send_email
+                db=db,
+                experiment=experiment,
+                conversation=conversation,
+                ai_client=ai_client,
+                executor=executor
             )
+        except Exception as e:
+            logger.error(f"Error in experiment {experiment_id}: {e}")
+            if experiment:
+                experiment.status = 'failed'
+                db.commit()
         finally:
+            executor.shutdown()
             db.close()

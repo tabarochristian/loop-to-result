@@ -1,90 +1,105 @@
 import time
 import logging
+from typing import Optional
 
-def run_feedback_loop(db, experiment, conversation, ai_client, executor, notifier, max_iterations=10):
-    """
-    Core feedback loop for iterative AI code generation and execution.
+from models import Message
 
-    Roles:
-    - User: initial prompt and any additional input
-    - AI: generative AI model providing code suggestions
-    - Jupyter (Machine): executes code and returns output/errors
-    """
+logger = logging.getLogger(__name__)
 
-    logger = logging.getLogger(__name__)
+def run_feedback_loop(
+    db,
+    experiment,
+    conversation,
+    ai_client,
+    executor,
+    max_iterations: int = 10,
+    iteration_delay: float = 1.0
+):
+    """Core feedback loop for iterative AI code generation and execution."""
+    
     experiment.status = 'running'
     _safe_commit(db)
 
     try:
-        from models import Message
         for iteration in range(max_iterations):
-            # Fetch conversation history: only User & Jupyter messages
-            messages = [
-                {"sender": msg.sender, "content": msg.content}
-                for msg in db.query(
-                    Message
-                ).filter_by(experiment_id=experiment.id).all()
-            ]
+            if experiment.status == 'stopped':
+                logger.info(f"Experiment {experiment.id} stopped by user")
+                break
 
-            if iteration == 0 and not messages:
-                messages.append({"sender": "user", "content": experiment.prompt})
+            # Get conversation history
+            messages = _get_conversation_history(db, experiment.id, iteration, experiment.prompt)
 
-            # AI generates next code
+            # Get AI response
             original, code, text = ai_client.query(messages)
             conversation.append("system", original)
 
-            # Execute AI code
-            execution_result = None
-            if code:
-                execution_result = executor.execute(code)
-                execution_result = "\n".join([
-                    "Evaluate the below juypter result from the provided code",
-                    "if it address the problem do not return a code but summary message\n",
-                    "---- Juypter Result ----",
-                    execution_result
-                ])
-                conversation.append("assistant", execution_result or text)
+            # Execute code if available
+            execution_result = _execute_code(executor, code, conversation) if code else None
 
-            _safe_commit(db)
-
-            # Success heuristic
-            if not execution_result:
+            # Check for completion
+            if _should_complete(execution_result, iteration, max_iterations):
                 experiment.status = 'success'
                 _safe_commit(db)
                 break
 
-            time.sleep(1)
-        else:
-            experiment.status = 'failed'
-            _safe_commit(db)
-
+            time.sleep(iteration_delay)
     except Exception as e:
-        logger.exception("Exception in feedback loop")
-        conversation.append("system", f"Exception in feedback loop: {str(e)}")
+        logger.exception(f"Error in feedback loop for experiment {experiment.id}")
         experiment.status = 'failed'
+        conversation.append("system", f"Error: {str(e)}")
         _safe_commit(db, rollback_on_fail=True)
-
     finally:
         executor.shutdown()
 
-        # Send email notification
-        from models import Message
-        full_convo = "\n\n".join(
-            f"{msg.sender}: {msg.content}"
-            for msg in db.query(Message).filter_by(experiment_id=experiment.id).all()
-        )
-        subject = f"Experiment {experiment.id} finished with status: {experiment.status.upper()}"
-        body = f"Final status: {experiment.status}\n\nConversation history:\n{full_convo}"
-        print(subject, body)
-        # notifier(subject=subject, body=body, to_email="user@example.com", smtp_cfg={})
+def _get_conversation_history(db, experiment_id: str, iteration: int, prompt: str) -> list:
+    """Get conversation history from database."""
+    messages = [
+        {"sender": msg.sender, "content": msg.content}
+        for msg in db.query(Message)
+        .filter_by(experiment_id=experiment_id)
+        .order_by(Message.id.asc())
+        .all()
+    ]
+    if iteration == 0 and not messages:
+        messages.append({"sender": "user", "content": prompt})
+    return messages
 
+def _execute_code(executor, code: str, conversation) -> Optional[str]:
+    """Execute code and handle results."""
+    try:
+        execution_result = executor.execute(code)
+        if execution_result:
+            formatted_result = "\n".join([
+                "Jupyter Execution Result:",
+                "------------------------",
+                execution_result,
+                "\nEvaluate the above result. If it solves the problem, provide a summary instead of more code."
+            ])
+            conversation.append("assistant", formatted_result)
+            return formatted_result
+    except Exception as e:
+        error_msg = f"Execution error: {str(e)}"
+        conversation.append("system", error_msg)
+        return error_msg
+    return None
 
-def _safe_commit(db, rollback_on_fail=True):
+def _should_complete(execution_result: Optional[str], iteration: int, max_iterations: int) -> bool:
+    """Determine if the feedback loop should complete."""
+    if not execution_result:
+        return True
+    if "error" in execution_result.lower():
+        return False
+    if iteration >= max_iterations - 1:
+        return True
+    return False
+
+def _safe_commit(db, rollback_on_fail: bool = True):
+    """Safely commit database changes with error handling."""
     try:
         db.commit()
     except Exception as e:
         db.rollback()
         if rollback_on_fail:
-            logging.error(f"Commit failed; transaction rolled back: {e}")
+            logger.error(f"Commit failed; transaction rolled back: {e}")
         else:
             raise

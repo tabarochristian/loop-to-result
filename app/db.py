@@ -1,36 +1,39 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from models import Base  # import your SQLAlchemy Base metadata
-import os
+from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.ext.declarative import declarative_base
+from contextlib import contextmanager
 import logging
 
-# Determine absolute path
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "..", "data")
-DB_PATH = os.path.join(DATA_DIR, "db.sqlite3")
+logger = logging.getLogger(__name__)
 
-# Ensure `data/` folder exists
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    logging.info(f"Created database directory at {DATA_DIR}")
+# Database configuration
+SQLALCHEMY_DATABASE_URL = "sqlite:///./experiments.db"
+# For PostgreSQL: "postgresql://user:password@localhost/dbname"
 
-SQLALCHEMY_DATABASE_URI = f"sqlite:///{DB_PATH}"
-
-# SQLite specific: `check_same_thread=False` to allow multithreaded access
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URI,
-    connect_args={"check_same_thread": False}
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False}  # SQLite only
+    # For production, consider adding pool_size and max_overflow
 )
 
-# Create session factory
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Create tables if database file does not exist
-if not os.path.exists(DB_PATH):
-    logging.info("Database file not found. Creating new database and tables...")
+@contextmanager
+def get_db():
+    """Provide a transactional scope around a series of operations."""
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Database error: %s", str(e))
+        raise
+    finally:
+        db.close()
+
+def init_db():
+    """Initialize database tables."""
+    from models import Base
     Base.metadata.create_all(bind=engine)
-    logging.info("Database initialized successfully.")
+    logger.info("Database tables initialized")
