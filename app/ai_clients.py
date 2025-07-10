@@ -1,148 +1,191 @@
 import os
 import requests
 
+import os
+from xai_sdk import Client
+import time
+import random
+
+import os
+import time
+import random
+import logging
+from xai_sdk import Client
+
+import re
+import os
+import time
+import random
+import logging
+from xai_sdk import Client
+from xai_sdk.chat import system, user, assistant
+
+# Configure logging for debugging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+
 class AIClient:
     """
     Abstract base class for AI clients.
     """
-    def __init__(self, model=None):
+    def __init__(self, model=None, system_prompt=None):
         self.model = model
+        self.system_prompt = system_prompt or (
+            "You are an AI coding assistant in a Jupyter notebook. "
+            "The conversation consists of user questions and executed code results (Jupyter outputs). "
+            "You respond with Python code and explanations when appropriate."
+        )
+
+    def extract_code_and_clean_text(self, text):
+        """
+        Extracts the first Python code block from markdown-style content.
+        Returns a tuple:
+        (code inside the block, text without the code block including delimiters)
+        """
+        # Regex to find the code block including delimiters
+        match = re.search(r"```python\n(.*?)\n```", text, re.DOTALL)
+        if match:
+            code_only = match.group(1)             # Extract inner code
+            full_block = match.group(0)            # Entire block with backticks
+            cleaned_text = text.replace(full_block, "").strip()  # Remove block completely
+            return code_only, cleaned_text
+        return None, text.strip()
 
     def query(self, history):
         """
         Given conversation history (list of dicts with 'sender' and 'content'), return next code suggestion string.
+        Only considers User and Jupyter messages as input.
         """
         raise NotImplementedError()
 
-
-class OpenAIClient(AIClient):
-    """
-    OpenAI client using openai Python SDK.
-    """
-    def __init__(self, model=None):
-        super().__init__(model)
-        import openai
-        self.openai = openai
-        self.openai.api_key = os.getenv("OPENAI_API_KEY")
-        if not self.model:
-            self.model = "gpt-4"
-
-    def query(self, history):
-        messages = [
-            {"role": "system", "content": "You are an AI that generates Python code based on the conversation."}
-        ]
-
-        # Convert our history to OpenAI chat roles
+    @staticmethod
+    def validate_history(history):
         for msg in history:
-            if msg['sender'] == 'User':
+            if 'sender' not in msg or 'content' not in msg:
+                raise ValueError(f"Invalid history message: {msg}")
+
+    def map_history_to_agent(self, history):
+        """
+        Maps conversation history to OpenAI / Grok compatible message format.
+        Filters out AI responses from history.
+        """
+        messages = [{"role": "system", "content": self.system_prompt}]
+        for msg in history:
+            if msg['sender'] == 'user':
                 messages.append({"role": "user", "content": msg['content']})
-            elif msg['sender'] == 'AI':
-                messages.append({"role": "assistant", "content": msg['content']})
-            elif msg['sender'] == 'Machine':
-                # We can include machine output as user info or system info if needed
-                messages.append({"role": "user", "content": f"Machine output:\n{msg['content']}"})
-            elif msg['sender'] == 'System':
-                messages.append({"role": "system", "content": msg['content']})
+            elif msg['sender'] == 'assistant':
+                messages.append({"role": "user", "content": f"Jupyter output:\n{msg['content']}"})
+            elif msg['sender'] == 'system':
+                continue
+            else:
+                raise ValueError(f"Unknown sender: {msg['sender']}")
+        return messages
 
-        response = self.openai.ChatCompletion.create(
-            model=self.model,
-            messages=messages,
-            temperature=0
-        )
-        return response.choices[0].message.content.strip()
-
-
-class ClaudeClient(AIClient):
-    """
-    Anthropic Claude client using anthropic Python SDK.
-    """
-    def __init__(self, model=None):
-        super().__init__(model)
-        import anthropic
-        self.anthropic = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        if not self.model:
-            self.model = "claude-3-opus-20240229"
-
-    def query(self, history):
-        prompt_parts = []
-        for msg in history:
-            if msg['sender'] == 'User':
-                prompt_parts.append(f"\n\nHuman: {msg['content']}")
-            elif msg['sender'] == 'AI':
-                prompt_parts.append(f"\n\nAssistant: {msg['content']}")
-            elif msg['sender'] == 'Machine':
-                prompt_parts.append(f"\n\nMachine: {msg['content']}")
-            elif msg['sender'] == 'System':
-                prompt_parts.append(f"\n\nSystem: {msg['content']}")
-
-        prompt = "".join(prompt_parts) + "\n\nAssistant:"
-
-        response = self.anthropic.completions.create(
-            model=self.model,
-            max_tokens_to_sample=1024,
-            prompt=prompt,
-            stop_sequences=["\n\nHuman:"]
-        )
-        return response.completion.strip()
-
+# Configure logging for debugging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 class GrokClient(AIClient):
     """
-    Grok client using REST API.
+    Grok client using the official xAI Python SDK (synchronous, non-streaming).
+    Uses chat.create and sample() to generate a parsed response.
     """
-    def __init__(self, model=None):
-        super().__init__(model)
-        self.api_key = os.getenv("GROK_API_KEY")
-        self.base_url = os.getenv("GROK_API_BASE_URL", "https://api.x.ai/v1")
+    SUPPORTED_MODELS = ["grok-beta", "grok-2", "grok-3", "grok-3-latest"]
+
+    def __init__(self, model=None, system_prompt=None):
+        """
+        Initialize the Grok client with synchronous xAI SDK client.
+
+        Args:
+            model (str, optional): The Grok model to use (e.g., 'grok-3-latest').
+            system_prompt (str, optional): Custom system prompt.
+        """
+        super().__init__(model, system_prompt)
+        self.api_key = os.getenv("XAI_API_KEY")
         if not self.api_key:
-            raise RuntimeError("GROK_API_KEY environment variable not set")
-        if not self.model:
-            self.model = "grok-1"
+            raise RuntimeError("XAI_API_KEY environment variable not set")
 
-    def query(self, history):
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        # Set default model to grok-3-latest to match cURL example
+        self.model = model or "grok-3-latest"
+        if self.model not in self.SUPPORTED_MODELS:
+            raise ValueError(f"Unsupported model: {self.model}. Supported models: {self.SUPPORTED_MODELS}")
 
-        messages = [
-            {"role": "system", "content": "You are an AI that generates Python code based on the conversation."}
-        ]
+        # Initialize xAI SDK client
+        try:
+            import xai_sdk
+            logger.info(f"xAI SDK version: {xai_sdk.__version__}")
+            self.client = Client(api_key=self.api_key)
+            logger.info("Initialized xAI Client")
+            # Verify chat.create exists
+            if not hasattr(self.client.chat, 'create'):
+                logger.error("Client.chat does not have 'create' attribute. Available attributes: %s", dir(self.client.chat))
+                raise RuntimeError("xAI SDK Client.chat is missing 'create'. Check SDK version.")
+        except ImportError as e:
+            logger.error("Failed to import xai_sdk. Ensure it is installed: pip install xai-sdk")
+            raise RuntimeError(f"xAI SDK import error: {str(e)}")
 
-        for msg in history:
-            if msg['sender'] == 'User':
-                messages.append({"role": "user", "content": msg['content']})
-            elif msg['sender'] == 'AI':
-                messages.append({"role": "assistant", "content": msg['content']})
-            elif msg['sender'] == 'Machine':
-                messages.append({"role": "user", "content": f"Machine output:\n{msg['content']}"})
-            elif msg['sender'] == 'System':
-                messages.append({"role": "system", "content": msg['content']})
+    def query(self, history, max_retries=3):
+        """
+        Query the Grok API with conversation history and return the parsed response.
 
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": 0
-        }
+        Args:
+            history (list): List of message dictionaries with 'sender' and 'content'.
+            max_retries (int): Maximum number of retry attempts for rate limit errors.
 
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data['choices'][0]['message']['content'].strip()
+        Returns:
+            str: The parsed API response content.
 
+        Raises:
+            RuntimeError: If the query fails after retries or due to other errors.
+        """
+        self.validate_history(history)
+        messages = self.map_history_to_agent(history)
+        logger.debug(f"Querying xAI API with messages: {messages}")
 
-def get_client(name, model):
+        for attempt in range(max_retries):
+            try:
+                # Create chat session
+                chat = self.client.chat.create(
+                    model=self.model,
+                    temperature=0
+                )
+                logger.info(f"Started chat session with xAI API for model {self.model}")
+
+                # Append messages to chat
+                for message in messages:
+                    if message['role'] == 'system':
+                        chat.append(system(message['content']))
+                    elif message['role'] == 'user':
+                        chat.append(user(message['content']))
+                    elif message['role'] == 'assistant':
+                        chat.append(assistant(message['content']))
+                    else:
+                        logger.warning(f"Skipping unsupported message role: {message['role']}")
+
+                # Get response
+                response = chat.sample()
+                logger.info(f"Received response from xAI API for model {self.model}")
+                if hasattr(response, 'content'):
+                    original = response.content.strip()
+                    code, text = self.extract_code_and_clean_text(original)
+                    return original, code, text
+                else:
+                    logger.warning("Response has no content attribute: %s", vars(response) if hasattr(response, '__dict__') else str(response))
+                    return ""
+            except Exception as e:
+                logger.error(f"Unexpected error: {str(e)}")
+                raise RuntimeError(f"Unexpected error: {str(e)}")
+
+def get_client(name, model=None, system_prompt=None):
     name = name.lower()
+    return GrokClient(model, system_prompt)
+
     if name == 'openai':
-        return OpenAIClient(model)
+        return OpenAIClient(model, system_prompt)
     elif name == 'claude':
-        return ClaudeClient(model)
+        return ClaudeClient(model, system_prompt)
     elif name == 'grok':
-        return GrokClient(model)
+        return GrokClient(model, system_prompt)
     else:
         raise ValueError(f"Unknown AI client: {name}")

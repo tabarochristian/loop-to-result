@@ -1,4 +1,5 @@
 import time
+import logging
 
 def run_feedback_loop(db, experiment, conversation, ai_client, executor, notifier, max_iterations=10):
     """
@@ -7,65 +8,83 @@ def run_feedback_loop(db, experiment, conversation, ai_client, executor, notifie
     Roles:
     - User: initial prompt and any additional input
     - AI: generative AI model providing code suggestions
-    - Machine: executes code and returns output/errors
-
-    Args:
-        db: DB session
-        experiment: Experiment ORM instance
-        conversation: Conversation manager
-        ai_client: AIClient instance
-        executor: JupyterExecutor instance
-        notifier: email sending function
-        max_iterations: max number of AI-execute cycles before stopping
+    - Jupyter (Machine): executes code and returns output/errors
     """
 
+    logger = logging.getLogger(__name__)
     experiment.status = 'running'
-    db.commit()
+    _safe_commit(db)
 
     try:
+        from models import Message
         for iteration in range(max_iterations):
-            # Fetch full conversation history as list of dicts
-            # Expected keys: sender, content
+            # Fetch conversation history: only User & Jupyter messages
             messages = [
                 {"sender": msg.sender, "content": msg.content}
-                for msg in db.query(conversation.db.query(conversation.db.models.Message).filter_by(experiment_id=experiment.id).statement).all()
+                for msg in db.query(
+                    Message
+                ).filter_by(experiment_id=experiment.id).all()
             ]
 
-            # If first iteration, seed history with initial prompt from User if no messages yet
             if iteration == 0 and not messages:
-                messages.append({"sender": "User", "content": experiment.prompt})
+                messages.append({"sender": "user", "content": experiment.prompt})
 
-            # AI generates next code snippet or refinement
-            ai_response = ai_client.query(messages)
-            conversation.append("AI", ai_response)
+            # AI generates next code
+            original, code, text = ai_client.query(messages)
+            conversation.append("system", original)
 
             # Execute AI code
-            execution_result = executor.execute(ai_response)
-            conversation.append("Machine", execution_result)
+            execution_result = None
+            if code:
+                execution_result = executor.execute(code)
+                execution_result = "\n".join([
+                    "Evaluate the below juypter result from the provided code",
+                    "if it address the problem do not return a code but summary message\n",
+                    "---- Juypter Result ----",
+                    execution_result
+                ])
+                conversation.append("assistant", execution_result or text)
 
-            db.commit()
+            _safe_commit(db)
 
-            # Heuristic to detect success (customize as needed)
-            if "success" in execution_result.lower() or "error" not in execution_result.lower():
+            # Success heuristic
+            if not execution_result:
                 experiment.status = 'success'
-                db.commit()
+                _safe_commit(db)
                 break
 
-            # Sleep briefly to avoid API flooding or kernel overload
             time.sleep(1)
         else:
             experiment.status = 'failed'
-            db.commit()
+            _safe_commit(db)
+
     except Exception as e:
-        conversation.append("System", f"Exception in feedback loop: {str(e)}")
+        logger.exception("Exception in feedback loop")
+        conversation.append("system", f"Exception in feedback loop: {str(e)}")
         experiment.status = 'failed'
-        db.commit()
+        _safe_commit(db, rollback_on_fail=True)
+
     finally:
         executor.shutdown()
-        # Send email notification with summary
+
+        # Send email notification
+        from models import Message
         full_convo = "\n\n".join(
-            f"{msg.sender}: {msg.content}" for msg in db.query(conversation.db.query(conversation.db.models.Message).filter_by(experiment_id=experiment.id).statement).all()
+            f"{msg.sender}: {msg.content}"
+            for msg in db.query(Message).filter_by(experiment_id=experiment.id).all()
         )
         subject = f"Experiment {experiment.id} finished with status: {experiment.status.upper()}"
         body = f"Final status: {experiment.status}\n\nConversation history:\n{full_convo}"
-        notifier(subject=subject, body=body, to_email="user@example.com", smtp_cfg={})
+        print(subject, body)
+        # notifier(subject=subject, body=body, to_email="user@example.com", smtp_cfg={})
+
+
+def _safe_commit(db, rollback_on_fail=True):
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        if rollback_on_fail:
+            logging.error(f"Commit failed; transaction rolled back: {e}")
+        else:
+            raise

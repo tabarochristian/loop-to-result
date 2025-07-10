@@ -4,6 +4,7 @@ from email.message import EmailMessage
 import logging
 
 def send_email(subject, body, to_email, smtp_cfg):
+    return
     """
     Send email notification.
     smtp_cfg should include:

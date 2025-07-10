@@ -11,10 +11,9 @@ class Conversation:
 
     def append(self, sender, content):
         msg = Message(
-            experiment_id=self.experiment.id,
+            experiment_id=self.experiment,
             sender=sender,
-            content=content,
-            timestamp=datetime.utcnow()
+            content=content
         )
         self.db.add(msg)
         self.db.commit()
