@@ -1,142 +1,107 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Code Feedback Loop</title>
-    <!-- Bootstrap CSS -->
-    <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
-      rel="stylesheet"
-    />
-  </head>
-
-  <body>
-    <div class="container-fluid">
-      <div class="row vh-100">
-        <nav class="col-md-4 col-lg-3 bg-light sidebar p-3 overflow-auto">
-          <h2>Experiments</h2>
-          <div
-            id="experiments-list"
-            class="list-group"
-            style="max-height: 85vh; overflow-y: auto"
-          >
-            <!-- Dynamically populated -->
-            {% for experiment in experiments %}
-            <a
-              class="list-group-item d-flex justify-content-between align-items-start"
-              href="/progress/{{ experiment.id }}"
-            >
-              <div class="ms-2 me-auto">
-                <div class="fw-bold">
-                  Experiment #{{ experiment.id }} - {{ experiment.ai_client |
-                  capitalize }} / {{ experiment.model }}
-                </div>
-                <small class="text-muted"
-                  >Started: {{ experiment.created_at.strftime('%Y-%m-%d %H:%M')
-                  }}</small
-                >
-              </div>
-              <span
-                class="badge me-1 {% if experiment.status == 'completed' %} bg-success {% elif experiment.status == 'running' %} bg-primary {% elif experiment.status == 'error' %} bg-danger {% else %} bg-secondary {% endif %} rounded-pill"
-              >
-                {{ experiment.status.capitalize() }}
-              </span>
-            </a>
-            {% else %}
-            <a class="list-group-item text-muted">No experiments found.</a>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Experiment Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f3f4f6; }
+        .sidebar { 
+            width: 200px; 
+            background-color: #ffffff; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .content { margin-left: 220px; }
+        .status-pending { color: #d97706; font-weight: bold; }
+        .status-running { color: #2563eb; font-weight: bold; }
+        .status-success { color: #16a34a; font-weight: bold; }
+        .status-failed { color: #dc2626; font-weight: bold; }
+        .status-stopped { color: #6b7280; font-weight: bold; }
+        .input-form { 
+            background-color: #ffffff; 
+            border-radius: 8px; 
+            padding: 1rem; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); 
+        }
+        .toast { 
+            position: fixed; 
+            bottom: 20px; 
+            right: 20px; 
+            background-color: #10b981; 
+            color: white; 
+            padding: 0.75rem; 
+            border-radius: 6px; 
+            display: none; 
+            animation: fadeIn 0.3s, fadeOut 0.3s 2.7s;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+    </style>
+</head>
+<body>
+    <div class="sidebar fixed top-0 left-0 h-full p-4">
+        <h3 class="text-lg font-semibold mb-4 text-gray-800">Experiments</h3>
+        <div class="space-y-2">
+            {% for exp in experiments %}
+            <div class="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center">
+                <a href="/progress/{{ exp.id }}" class="text-sm text-blue-600 hover:underline">
+                    #{{ exp.id[:8] }} <span class="status-{{ exp.status }}">{{ exp.status }}</span>
+                </a>
+                <form action="/delete/{{ exp.id }}" method="POST" onsubmit="return confirm('Are you sure you want to stop and delete this experiment?');">
+                    <button type="submit" class="text-red-600 hover:text-red-800 text-sm">Delete</button>
+                </form>
+            </div>
             {% endfor %}
-          </div>
-        </nav>
-
-        <main class="col-md-6 col-lg-9 px-md-4">
-          <h1 class="mt-3">Start New Experiment</h1>
-
-          <form id="experiment-form" class="mb-4" method="post" action="/start">
-            <div class="mb-3">
-              <label for="prompt" class="form-label"
-                >Initial Prompt / Additional Info</label
-              >
-              <textarea
-                id="prompt"
-                name="prompt"
-                class="form-control"
-                rows="5"
-                required
-              ></textarea>
-            </div>
-
-            <div class="mb-3">
-              <label for="ai-client-model" class="form-label"
-                >Select AI Client & Model</label
-              >
-              <select
-                id="ai-client-model"
-                name="model"
-                class="form-select"
-                required
-              >
-                <optgroup label="OpenAI">
-                  <option value="openai:gpt-4o">GPT-4o (openai:gpt-4o)</option>
-                  <option value="openai:gpt-4">GPT-4 (openai:gpt-4)</option>
-                  <option value="openai:gpt-3.5-turbo">
-                    GPT-3.5 Turbo (openai:gpt-3.5-turbo)
-                  </option>
-                </optgroup>
-                <optgroup label="Grok">
-                  <option value="grok:grok-3-mini">
-                    Grok 3 Mini (grok:grok-3-mini)
-                  </option>
-                  <option value="grok:grok-3">Grok 3 (grok:grok-3)</option>
-                  <option value="grok:grok-2-mini">
-                    Grok 2 Mini (grok:grok-2-mini)
-                  </option>
-                  <option value="grok:grok-2">Grok 2 (grok:grok-2)</option>
-                  <option value="grok:grok-1.5">
-                    Grok 1.5 (grok:grok-1.5)
-                  </option>
-                  <option value="grok:grok-1">Grok 1 (grok:grok-1)</option>
-                </optgroup>
-                <optgroup label="Claude">
-                  <option value="claude:claude-3">
-                    Claude 3 (claude:claude-3)
-                  </option>
-                  <option value="claude:claude-2">
-                    Claude 2 (claude:claude-2)
-                  </option>
-                </optgroup>
-                <optgroup label="Gemini">
-                  <option value="gemini:gemini-1.5-pro-latest">
-                    Gemini 1.5 Pro Latest (gemini:gemini-1.5-pro-latest)
-                  </option>
-                  <option value="gemini:gemini-1.0">
-                    Gemini 1.0 (gemini:gemini-1.0)
-                  </option>
-                </optgroup>
-              </select>
-            </div>
-
-            <button type="submit" class="btn btn-primary">
-              Start Experiment
-            </button>
-          </form>
-
-          <section id="experiment-status" style="display: none">
-            <h2>Experiment Status</h2>
-            <div id="status-summary" class="mb-3"></div>
-            <pre
-              id="conversation-log"
-              class="border rounded p-3 bg-light"
-              style="height: 300px; overflow-y: auto"
-            ></pre>
-            <button id="stop-experiment-btn" class="btn btn-danger mt-3">
-              Stop Experiment
-            </button>
-          </section>
-        </main>
-      </div>
+        </div>
     </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-  </body>
+    <div class="content p-6">
+        <h1 class="text-xl font-bold text-gray-800 mb-4">Experiment Dashboard</h1>
+        <div class="input-form">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Start New Experiment</h2>
+            <form id="start-form" method="POST" action="/start" class="space-y-4">
+                <div>
+                    <label for="prompt" class="block text-sm font-medium text-gray-700">Prompt</label>
+                    <textarea id="prompt" name="prompt" class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" rows="4" placeholder="Enter your prompt..." required></textarea>
+                </div>
+                <div>
+                    <label for="model" class="block text-sm font-medium text-gray-700">AI Model</label>
+                    <select id="model" name="model" class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                        <option value="grok:grok-beta">Grok (Beta)</option>
+                        <option value="grok:grok-2">Grok 2</option>
+                        <option value="grok:grok-3">Grok 3</option>
+                        <option value="grok:grok-3-latest">Grok 3 Latest</option>
+                    </select>
+                </div>
+                <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm">Start Experiment</button>
+            </form>
+        </div>
+        <div id="toast" class="toast">Experiment started successfully!</div>
+    </div>
+    <script>
+        // AJAX form submission for starting a new experiment
+        document.getElementById("start-form").addEventListener("submit", function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            fetch("/start", {
+                method: "POST",
+                body: formData
+            }).then(response => {
+                if (response.ok) {
+                    document.getElementById("prompt").value = "";
+                    document.getElementById("model").selectedIndex = 0;
+                    const toast = document.getElementById("toast");
+                    toast.style.display = "block";
+                    setTimeout(() => toast.style.display = "none", 3000);
+                    // Optionally redirect to the new experiment's progress page
+                    response.json().then(data => {
+                        setTimeout(() => window.location.href = `/progress/${data.id}`, 1000);
+                    });
+                } else {
+                    console.error("Failed to start experiment");
+                }
+            }).catch(error => console.error("Error starting experiment:", error));
+        });
+    </script>
+</body>
 </html>

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Experiment #{{ experiment.id }} Progress</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f3f4f6; margin: 0; }
+        .sidebar { 
+            width: 200px; 
+            background-color: #ffffff; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .content { 
+            margin-left: 220px; 
+            height: 100vh; 
+            display: flex; 
+            flex-direction: column; 
+        }
+        .message-list { 
+            flex: 1; 
+            overflow-y: auto; 
+            background-color: #ffffff; 
+            border-radius: 8px; 
+            padding: 1rem; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); 
+            margin-bottom: 1rem;
+        }
+        .message { 
+            padding: 0.5rem; 
+            border-radius: 6px; 
+            margin-bottom: 0.5rem; 
+            font-size: 0.9rem; 
+        }
+        .message-user { background-color: #e6f3ff; }
+        .message-system { background-color: #f0f0f0; }
+        .message-assistant { background-color: #e6ffe6; }
+        .status-pending { color: #d97706; font-weight: bold; }
+        .status-running { color: #2563eb; font-weight: bold; }
+        .status-success { color: #16a34a; font-weight: bold; }
+        .status-failed { color: #dc2626; font-weight: bold; }
+        .status-stopped { color: #6b7280; font-weight: bold; }
+        .input-form { 
+            background-color: #ffffff; 
+            border-radius: 8px; 
+            padding: 1rem; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .input-disabled { 
+            opacity: 0.5; 
+            pointer-events: none; 
+        }
+        .toast { 
+            position: fixed; 
+            bottom: 20px; 
+            right: 20px; 
+            background-color: #10b981; 
+            color: white; 
+            padding: 0.75rem; 
+            border-radius: 6px; 
+            display: none; 
+            animation: fadeIn 0.3s, fadeOut 0.3s 2.7s;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+    </style>
+</head>
+<body>
+    <div class="sidebar fixed top-0 left-0 h-full p-4">
+        <h3 class="text-lg font-semibold mb-4 text-gray-800">Current Experiment</h3>
+        <div class="bg-white p-3 rounded-lg shadow-sm">
+            <p class="text-sm"><strong>ID:</strong> {{ experiment.id[:8] }}</p>
+            <p class="text-sm"><strong>AI:</strong> {{ experiment.ai_client }}</p>
+            <p class="text-sm"><strong>Model:</strong> {{ experiment.model }}</p>
+            <p class="text-sm"><strong>Status:</strong> <span id="status" class="status-{{ experiment.status }}">{{ experiment.status }}</span></p>
+            <a href="/" class="text-blue-600 hover:underline text-sm mt-2 inline-block">Back to Dashboard</a>
+            <form action="/delete/{{ experiment.id }}" method="POST" onsubmit="return confirm('Are you sure you want to stop and delete this experiment?');" class="mt-2">
+                <button type="submit" class="text-red-600 hover:text-red-800 text-sm">Delete</button>
+            </form>
+        </div>
+    </div>
+    <div class="content p-6">
+        <h1 class="text-xl font-bold text-gray-800 mb-4">Experiment #{{ experiment.id[:8] }} Progress</h1>
+        <div class="message-list" id="message-list">
+            {% for message in messages %}
+            <div class="message message-{{ message.sender }} transition-opacity duration-300" data-timestamp="{{ message.timestamp }}">
+                <div class="flex justify-between items-baseline">
+                    <strong class="text-sm text-gray-700">{{ message.sender }}</strong>
+                    <small class="text-xs text-gray-500">{{ message.timestamp }}</small>
+                </div>
+                <pre class="text-sm text-gray-800 mt-1 whitespace-pre-wrap">{{ message.content }}</pre>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="input-form" id="input-form-container">
+            <form id="input-form" method="POST" action="/progress/{{ experiment.id }}/input" class="flex space-x-2">
+                <textarea id="input-content" name="content" class="flex-1 border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" rows="2" placeholder="Enter additional information..." required></textarea>
+                <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm">Submit</button>
+            </form>
+        </div>
+        <div id="toast" class="toast">Input submitted successfully!</div>
+    </div>
+    <script>
+        // Set to track seen message timestamps
+        const seenMessages = new Set(
+            Array.from(document.querySelectorAll("#message-list .message"))
+                .map(el => el.dataset.timestamp)
+                .filter(ts => ts)
+        );
+
+        function updateInputFormStatus(status) {
+            const inputFormContainer = document.getElementById("input-form-container");
+            const inputContent = document.getElementById("input-content");
+            const submitButton = document.querySelector("#input-form button[type='submit']");
+            
+            if (status === "failed" || status === "success") {
+                inputFormContainer.classList.add("input-disabled");
+                inputContent.disabled = true;
+                submitButton.disabled = true;
+            } else {
+                inputFormContainer.classList.remove("input-disabled");
+                inputContent.disabled = false;
+                submitButton.disabled = false;
+            }
+        }
+
+        function connectWebSocket() {
+            const ws = new WebSocket(`ws://${window.location.host}/ws/{{ experiment.id }}`);
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.event === "deleted") {
+                    window.location.href = "/";
+                } else if (data.event === "new_message") {
+                    const timestamp = data.message.timestamp;
+                    // Check for duplicate messages
+                    if (seenMessages.has(timestamp)) {
+                        console.log(`Duplicate message with timestamp ${timestamp} ignored`);
+                        return;
+                    }
+                    seenMessages.add(timestamp);
+                    
+                    const messageList = document.getElementById("message-list");
+                    const div = document.createElement("div");
+                    div.className = `message message-${data.message.sender} transition-opacity duration-300`;
+                    div.dataset.timestamp = timestamp;
+                    div.innerHTML = `
+                        <div class="flex justify-between items-baseline">
+                            <strong class="text-sm text-gray-700">${data.message.sender}</strong>
+                            <small class="text-xs text-gray-500">${timestamp}</small>
+                        </div>
+                        <pre class="text-sm text-gray-800 mt-1 whitespace-pre-wrap">${data.message.content}</pre>
+                    `;
+                    messageList.appendChild(div);
+                    messageList.scrollTop = messageList.scrollHeight;
+                } else if (data.event === "status_update") {
+                    const statusSpan = document.getElementById("status");
+                    statusSpan.textContent = data.experiment.status;
+                    statusSpan.className = `status-${data.experiment.status}`;
+                    updateInputFormStatus(data.experiment.status);
+                }
+            };
+            
+            ws.onclose = function() {
+                console.log("WebSocket closed. Reconnecting in 5 seconds...");
+                setTimeout(connectWebSocket, 5000);
+            };
+            
+            ws.onerror = function(error) {
+                console.error("WebSocket error:", error);
+            };
+            
+            return ws;
+        }
+        
+        // Initial WebSocket connection
+        connectWebSocket();
+        
+        // Check initial status on page load
+        updateInputFormStatus("{{ experiment.status }}");
+        
+        // AJAX form submission
+        document.getElementById("input-form").addEventListener("submit", function(e) {
+            e.preventDefault();
+            const content = document.getElementById("input-content").value;
+            fetch(`/progress/{{ experiment.id }}/input`, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: `content=${encodeURIComponent(content)}`
+            }).then(response => {
+                if (response.ok) {
+                    document.getElementById("input-content").value = "";
+                    const toast = document.getElementById("toast");
+                    toast.style.display = "block";
+                    setTimeout(() => toast.style.display = "none", 3000);
+                } else {
+                    console.error("Failed to submit input");
+                }
+            }).catch(error => console.error("Error submitting input:", error));
+        });
+    </script>
+</body>
+</html>

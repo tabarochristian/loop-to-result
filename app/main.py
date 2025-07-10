@@ -1,162 +1,221 @@
-from fastapi import FastAPI, Request, Form, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi import FastAPI, Request, Form, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
-import uuid
-import json
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 from typing import List, Dict
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta
 
 from experiment_manager import ExperimentManager
-from models import Base, Experiment, Message
-from db import SessionLocal, engine, get_db
-from websocket_manager import WebSocketManager
+from models import Experiment, Message
+from db import SessionLocal, get_session
 
-# Initialize DB schema on startup
-Base.metadata.create_all(bind=engine)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# WebSocket manager for real-time updates
-websocket_manager = WebSocketManager()
+# WebSocket connections
+active_connections: Dict[str, List[WebSocket]] = {}
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """Render the home page with experiment list and creation form."""
+@app.websocket("/ws/{experiment_id}")
+async def websocket_endpoint(websocket: WebSocket, experiment_id: str):
+    await websocket.accept()
+    if experiment_id not in active_connections:
+        active_connections[experiment_id] = []
+    active_connections[experiment_id].append(websocket)
+    
+    # Create a single session for the WebSocket connection
     db = SessionLocal()
     try:
-        experiments = db.query(Experiment).order_by(Experiment.created_at.desc()).all()
-        return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "experiments": experiments}
-        )
-    finally:
-        db.close()
-
-@app.post("/start")
-async def start_experiment(
-    request: Request,
-    prompt: str = Form(...),
-    model: str = Form(...)
-):
-    """Start a new experiment with selected AI model."""
-    db = SessionLocal()
-    try:
-        client, model_name = model.split(':')
-        manager = ExperimentManager(get_db)
-        exp_id = manager.start_experiment(prompt, client, model_name)
-        return RedirectResponse(f"/experiment/{exp_id}", status_code=303)
-    finally:
-        db.close()
-
-@app.get("/experiment/{experiment_id}", response_class=HTMLResponse)
-async def view_experiment(experiment_id: str, request: Request):
-    """View experiment details and progress."""
-    db = SessionLocal()
-    try:
+        # Send initial experiment data
         experiment = db.query(Experiment).get(experiment_id)
         if not experiment:
-            return RedirectResponse("/", status_code=303)
-
+            await websocket.send_json({"event": "deleted"})
+            return
+        
+        last_timestamp = datetime.utcnow() - timedelta(days=1)  # Start with a wide range
+        last_status = experiment.status
+        
+        # Send initial messages
         messages = (
             db.query(Message)
             .filter(Message.experiment_id == experiment_id)
-            .order_by(Message.id.asc())
+            .order_by(Message.timestamp.asc())
             .all()
         )
+        if messages:
+            last_timestamp = messages[-1].timestamp
+            for message in messages:
+                await websocket.send_json({
+                    "event": "new_message",
+                    "message": {
+                        "sender": message.sender,
+                        "content": message.content,
+                        "timestamp": message.timestamp.isoformat()
+                    }
+                })
+            logger.info(f"Sent {len(messages)} initial messages for experiment {experiment_id}")
         
-        return templates.TemplateResponse(
-            "experiment.html",
-            {
-                "request": request,
-                "experiment": experiment,
-                "messages": messages
-            }
-        )
-    finally:
-        db.close()
-
-@app.post("/experiment/{experiment_id}/stop")
-async def stop_experiment(experiment_id: str):
-    """Stop a running experiment."""
-    db = SessionLocal()
-    try:
-        experiment = db.query(Experiment).get(experiment_id)
-        if experiment:
-            experiment.status = 'stopped'
-            db.commit()
-            await websocket_manager.broadcast(
-                experiment_id,
-                {"type": "status_update", "status": "stopped"}
-            )
-        return RedirectResponse(f"/experiment/{experiment_id}", status_code=303)
-    finally:
-        db.close()
-
-@app.post("/experiment/{experiment_id}/delete")
-async def delete_experiment(experiment_id: str):
-    """Delete an experiment (after stopping it if running)."""
-    db = SessionLocal()
-    try:
-        experiment = db.query(Experiment).get(experiment_id)
-        if experiment:
-            if experiment.status == 'running':
-                experiment.status = 'stopped'
-                db.commit()
-                await websocket_manager.broadcast(
-                    experiment_id,
-                    {"type": "status_update", "status": "stopped"}
-                )
-            db.delete(experiment)
-            db.commit()
-        return RedirectResponse("/", status_code=303)
-    finally:
-        db.close()
-
-@app.post("/experiment/{experiment_id}/message")
-async def add_message(
-    experiment_id: str,
-    request: Request,
-    message: str = Form(...)
-):
-    """Add a user message to a running experiment."""
-    db = SessionLocal()
-    try:
-        experiment = db.query(Experiment).get(experiment_id)
-        if experiment and experiment.status == 'running':
-            msg = Message(
-                experiment_id=experiment_id,
-                sender="user",
-                content=message
-            )
-            db.add(msg)
-            db.commit()
-            await websocket_manager.broadcast(
-                experiment_id,
-                {
-                    "type": "new_message",
-                    "sender": "user",
-                    "content": message,
-                    "timestamp": msg.timestamp.isoformat()
-                }
-            )
-        return RedirectResponse(f"/experiment/{experiment_id}", status_code=303)
-    finally:
-        db.close()
-
-@app.websocket("/ws/{experiment_id}")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    experiment_id: str
-):
-    """WebSocket endpoint for real-time updates."""
-    await websocket.accept()
-    websocket_manager.register(experiment_id, websocket)
-    
-    try:
         while True:
-            data = await websocket.receive_text()
-            # Handle incoming messages if needed
+            experiment = db.query(Experiment).get(experiment_id)
+            if not experiment:
+                await websocket.send_json({"event": "deleted"})
+                break
+            
+            # Check for new messages
+            messages = (
+                db.query(Message)
+                .filter(Message.experiment_id == experiment_id, Message.timestamp > last_timestamp)
+                .order_by(Message.timestamp.asc())
+                .all()
+            )
+            if messages:
+                last_timestamp = messages[-1].timestamp
+                for message in messages:
+                    await websocket.send_json({
+                        "event": "new_message",
+                        "message": {
+                            "sender": message.sender,
+                            "content": message.content,
+                            "timestamp": message.timestamp.isoformat()
+                        }
+                    })
+                logger.info(f"Sent {len(messages)} new messages for experiment {experiment_id}")
+            
+            # Check for status change
+            if experiment.status != last_status:
+                last_status = experiment.status
+                await websocket.send_json({
+                    "event": "status_update",
+                    "experiment": {
+                        "id": experiment.id,
+                        "status": experiment.status,
+                        "ai_client": experiment.ai_client,
+                        "model": experiment.model
+                    }
+                })
+                logger.info(f"Sent status update ({last_status}) for experiment {experiment_id}")
+            
+            db.commit()  # Ensure session is fresh
+            await asyncio.sleep(1)  # Reduced to 1 second for faster updates
     except WebSocketDisconnect:
-        websocket_manager.unregister(experiment_id, websocket)
+        logger.info(f"WebSocket disconnected for experiment {experiment_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error for experiment {experiment_id}: {str(e)}")
+    finally:
+        db.close()
+        if experiment_id in active_connections and websocket in active_connections[experiment_id]:
+            active_connections[experiment_id].remove(websocket)
+            if not active_connections[experiment_id]:
+                del active_connections[experiment_id]
+
+@app.get("/")
+async def index(request: Request, db: Session = Depends(get_session)):
+    experiments = db.query(Experiment).order_by(Experiment.created_at.desc()).all()
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "experiments": experiments}
+    )
+
+@app.post("/start")
+async def start(
+    request: Request,
+    prompt: str = Form(...),
+    model: str = Form(...),
+    db: Session = Depends(get_session)
+):
+    try:
+        client, model = model.split(':')
+        manager = ExperimentManager(SessionLocal)
+        exp_id = manager.start_experiment(prompt, client, model)
+        db.commit()
+        exp = {}
+
+        exp["id"] = exp_id,
+        # Return JSON response with experiment details
+        return JSONResponse(status_code=200, content=exp)
+    except Exception as e:
+        logger.error(f"Error starting experiment: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to start experiment")
+
+@app.get("/progress/{experiment_id}")
+async def progress(experiment_id: str, request: Request, db: Session = Depends(get_session)):
+    experiment = db.query(Experiment).get(experiment_id)
+    if not experiment:
+        return RedirectResponse("/", status_code=303)
+    
+    messages = (
+        db.query(Message)
+        .filter(Message.experiment_id == experiment_id)
+        .order_by(Message.timestamp.asc())
+        .all()
+    )
+    experiments = db.query(Experiment).order_by(Experiment.created_at.desc()).all()
+    return templates.TemplateResponse(
+        "progress.html",
+        {
+            "request": request,
+            "experiment": experiment,
+            "messages": messages,
+            "experiments": experiments
+        }
+    )
+
+@app.post("/progress/{experiment_id}/input")
+async def add_input(experiment_id: str, content: str = Form(...), db: Session = Depends(get_session)):
+    experiment = db.query(Experiment).get(experiment_id)
+    if not experiment or experiment.status not in ["running", "pending"]:
+        raise HTTPException(status_code=404, detail="Experiment not found or not active")
+    
+    message = Message(
+        experiment_id=experiment_id,
+        sender="user",
+        content=content,
+        timestamp=datetime.utcnow()
+    )
+    db.add(message)
+    db.commit()
+    
+    if experiment_id in active_connections:
+        for conn in active_connections[experiment_id]:
+            await conn.send_json({
+                "event": "new_message",
+                "message": {
+                    "sender": message.sender,
+                    "content": message.content,
+                    "timestamp": message.timestamp.isoformat()
+                }
+            })
+        logger.info(f"Notified {len(active_connections[experiment_id])} clients of new message for experiment {experiment_id}")
+    
+    return {"status": "success"}
+
+@app.post("/delete/{experiment_id}")
+async def delete_experiment(experiment_id: str, db: Session = Depends(get_session)):
+    experiment = db.query(Experiment).get(experiment_id)
+    if not experiment:
+        return RedirectResponse("/", status_code=303)
+    
+    experiment.status = "stopped"
+    db.commit()
+    
+    db.query(Message).filter(Message.experiment_id == experiment_id).delete()
+    db.delete(experiment)
+    db.commit()
+    
+    if experiment_id in active_connections:
+        for conn in active_connections[experiment_id]:
+            await conn.send_json({"event": "deleted"})
+        logger.info(f"Notified {len(active_connections[experiment_id])} clients of deletion for experiment {experiment_id}")
+    
+    return RedirectResponse("/", status_code=303)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
